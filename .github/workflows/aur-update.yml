@@ -52,7 +52,7 @@ jobs:
 
           if [[ -n "${REQUESTED_TAG}" ]]; then
             tag="${REQUESTED_TAG}"
-            release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${tag}")"
+            gh api "repos/${UPSTREAM_REPO}/releases/tags/${tag}" >/dev/null
           else
             release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/latest")"
             tag="$(jq -r '.tag_name // empty' <<<"${release_json}")"
@@ -141,7 +141,9 @@ jobs:
             exit 1
           fi
 
-          actual="$(curl -fsSL --retry 3 "${asset_url}" | sha256sum | awk '{print $1}')"
+          asset_path="${RUNNER_TEMP}/${asset}"
+          curl -fsSL --retry 3 -o "${asset_path}" "${asset_url}"
+          actual="$(sha256sum "${asset_path}" | awk '{print $1}')"
           if [[ "${actual}" != "${expected}" ]]; then
             echo "::error::Downloaded source archive checksum mismatch: ${actual} != ${expected}"
             exit 1
@@ -151,6 +153,7 @@ jobs:
           {
             echo "ready=true"
             echo "sha256=${expected}"
+            echo "asset_path=${asset_path}"
           } >> "${GITHUB_OUTPUT}"
 
       - name: Update PKGBUILD and .SRCINFO
@@ -179,6 +182,36 @@ jobs:
 
           echo "--- packaging diff ---"
           git diff -- PKGBUILD .SRCINFO
+
+      - name: Build-check the updated package on Arch
+        # A checksum match is not a build. KWin's effect ABI and Qt/KF6 header
+        # paths move; build the actual package before publishing metadata that
+        # users would fail to build.
+        if: steps.release.outputs.update == 'true' && steps.assets.outputs.ready == 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          ASSET_PATH: ${{ steps.assets.outputs.asset_path }}
+        run: |
+          set -euo pipefail
+
+          build_dir="$(mktemp -d)"
+          trap 'rm -rf "${build_dir}"' EXIT
+
+          cp PKGBUILD "${build_dir}/"
+          cp "${ASSET_PATH}" "${build_dir}/satur8-v${VERSION}-source.tar.gz"
+
+          docker run --rm \
+            -e HOST_UID="$(id -u)" \
+            -v "${build_dir}:/work" \
+            -w /work \
+            archlinux:base-devel \
+            bash -euc '
+              pacman -Syu --noconfirm --needed rust cmake kwin qt6-base qt6-declarative kcoreaddons kconfig >/tmp/pacman.log 2>&1 || { tail -50 /tmp/pacman.log; exit 1; }
+              useradd -m -u "$HOST_UID" builder
+              su builder -c "SRCDEST=/work makepkg --nodeps --nocheck --noconfirm"
+            '
+
+          ls -lh "${build_dir}"/*.pkg.tar.*
 
       - name: Commit and push packaging repository
         if: steps.release.outputs.update == 'true' && steps.assets.outputs.ready == 'true'

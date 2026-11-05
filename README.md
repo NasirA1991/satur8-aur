@@ -54,12 +54,20 @@ Each run:
    - the downloaded archive matches that checksum.
 4. Updates `pkgver`, resets `pkgrel` to `1`, updates `sha256sums` in
    `PKGBUILD`, and regenerates `.SRCINFO`.
-5. Commits the packaging change here and pushes the same files to
+5. Builds the resulting package in a current `archlinux:base-devel` container
+   (Rust workspace, KWin effect, package step). If the build fails, nothing is
+   committed or published.
+6. Commits the packaging change here and pushes the same files to
    `ssh://aur@aur.archlinux.org/satur8.git`.
 
 AUR is treated as the source of truth for what is already published. If a push
 to the AUR fails after the GitHub commit succeeds, the next run sees the AUR is
 still behind and retries the publish.
+
+The build check takes roughly 9 minutes on a GitHub-hosted runner and only runs
+when a new upstream version is found. It is the part that catches KWin/Qt/KF6
+drift (the v0.3.3 package needed a KWin 6.8 compatibility patch) before a broken
+update reaches users.
 
 ### Why polling instead of an upstream release trigger?
 
