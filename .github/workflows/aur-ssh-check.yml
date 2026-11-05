@@ -1,0 +1,32 @@
+name: AUR SSH check
+
+on:
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+jobs:
+  check:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify AUR credentials
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_KNOWN_HOSTS: ${{ secrets.AUR_KNOWN_HOSTS }}
+        run: |
+          set -euo pipefail
+          : "${AUR_SSH_PRIVATE_KEY:?AUR_SSH_PRIVATE_KEY is missing}"
+          : "${AUR_KNOWN_HOSTS:?AUR_KNOWN_HOSTS is missing}"
+
+          install -m 700 -d "${HOME}/.ssh"
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${HOME}/.ssh/aur"
+          chmod 600 "${HOME}/.ssh/aur"
+          printf '%s\n' "${AUR_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 644 "${HOME}/.ssh/known_hosts"
+
+          export GIT_SSH_COMMAND="ssh -i ${HOME}/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+          git clone --depth 1 ssh://aur@aur.archlinux.org/satur8.git "${RUNNER_TEMP}/satur8"
+          cd "${RUNNER_TEMP}/satur8"
+          grep -E '^pkgver=' PKGBUILD
+          git push --dry-run origin HEAD:master
