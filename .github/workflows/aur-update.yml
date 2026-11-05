@@ -1,0 +1,286 @@
+name: Update AUR package
+
+on:
+  schedule:
+    # Check upstream every 6 hours. GitHub may delay scheduled runs.
+    - cron: "17 */6 * * *"
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: "Upstream release tag to publish (default: latest release)"
+        required: false
+        type: string
+      dry_run:
+        description: "Update files and show the diff, but do not push anywhere"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: aur-update
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: NtrpyDev/satur8
+  AUR_PKG: satur8
+
+jobs:
+  update:
+    name: Check upstream and publish
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out packaging repository
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "Satur8 AUR updater"
+          git config user.email "112448715+NasirA1991@users.noreply.github.com"
+
+      - name: Resolve upstream release and compare with AUR
+        id: release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          REQUESTED_TAG: ${{ inputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if [[ -n "${REQUESTED_TAG}" ]]; then
+            tag="${REQUESTED_TAG}"
+            release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${tag}")"
+          else
+            release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/latest")"
+            tag="$(jq -r '.tag_name // empty' <<<"${release_json}")"
+          fi
+
+          if [[ -z "${tag}" ]]; then
+            echo "::error::Could not determine the upstream release tag"
+            exit 1
+          fi
+
+          # The PKGBUILD source URL is built as .../download/v$pkgver/..., so the
+          # upstream tag must use the same v-prefix upstream has always used.
+          if [[ "${tag}" != v* ]]; then
+            echo "::error::Expected a v-prefixed upstream tag, got '${tag}'"
+            exit 1
+          fi
+
+          version="${tag#v}"
+          # Keep pkgver valid for pacman: no '-', whitespace, or slashes.
+          if [[ ! "${version}" =~ ^[0-9][0-9A-Za-z.+_~]*$ ]]; then
+            echo "::error::Unsupported upstream tag '${tag}' (version '${version}')"
+            exit 1
+          fi
+
+          # The AUR is the source of truth for what is already published. If the
+          # RPC call fails, fail the run rather than risk pushing a duplicate or
+          # a downgrade based on a stale local PKGBUILD.
+          aur_json="$(curl -fsS --retry 3 "https://aur.archlinux.org/rpc/v5/info?arg[]=${AUR_PKG}")"
+          aur_version="$(jq -r '.results[0].Version // empty' <<<"${aur_json}")"
+          current="${aur_version%-*}"
+          if [[ -z "${current}" ]]; then
+            echo "::error::${AUR_PKG} is not published on the AUR (or the RPC response was empty)"
+            exit 1
+          fi
+
+          update=false
+          if [[ "${version}" != "${current}" ]] &&
+             [[ "$(printf '%s\n%s\n' "${current}" "${version}" | sort -V | tail -n1)" == "${version}" ]]; then
+            update=true
+          fi
+
+          echo "Upstream: ${tag} (${version})"
+          echo "AUR:      ${current}"
+          echo "Update:   ${update}"
+
+          {
+            echo "tag=${tag}"
+            echo "version=${version}"
+            echo "current=${current}"
+            echo "update=${update}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Verify release source archive
+        id: assets
+        if: steps.release.outputs.update == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.release.outputs.tag }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          release_json="$(gh api "repos/${UPSTREAM_REPO}/releases/tags/${TAG}")"
+          asset="satur8-v${VERSION}-source.tar.gz"
+
+          asset_url="$(jq -r --arg n "${asset}" \
+            '.assets[]? | select(.name == $n) | .browser_download_url' <<<"${release_json}")"
+          sha_url="$(jq -r --arg n "${asset}.sha256" \
+            '.assets[]? | select(.name == $n) | .browser_download_url' <<<"${release_json}")"
+          digest="$(jq -r --arg n "${asset}" \
+            '.assets[]? | select(.name == $n) | .digest // empty' <<<"${release_json}")"
+
+          if [[ -z "${asset_url}" || -z "${sha_url}" ]]; then
+            echo "::notice::${TAG} exists but its source archive is not attached yet; retrying on the next run."
+            echo "ready=false" >> "${GITHUB_OUTPUT}"
+            exit 0
+          fi
+
+          expected="$(curl -fsSL --retry 3 "${sha_url}" | awk 'NR==1 {print $1}')"
+          if [[ ! "${expected}" =~ ^[0-9a-f]{64}$ ]]; then
+            echo "::error::Invalid checksum file: ${sha_url}"
+            exit 1
+          fi
+
+          if [[ -n "${digest}" && "${digest}" != "sha256:${expected}" ]]; then
+            echo "::error::Release .sha256 (${expected}) does not match the GitHub asset digest (${digest})"
+            exit 1
+          fi
+
+          actual="$(curl -fsSL --retry 3 "${asset_url}" | sha256sum | awk '{print $1}')"
+          if [[ "${actual}" != "${expected}" ]]; then
+            echo "::error::Downloaded source archive checksum mismatch: ${actual} != ${expected}"
+            exit 1
+          fi
+
+          echo "Verified ${asset}: ${expected}"
+          {
+            echo "ready=true"
+            echo "sha256=${expected}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Update PKGBUILD and .SRCINFO
+        if: steps.release.outputs.update == 'true' && steps.assets.outputs.ready == 'true'
+        env:
+          VERSION: ${{ steps.release.outputs.version }}
+          SHA256: ${{ steps.assets.outputs.sha256 }}
+        run: |
+          set -euo pipefail
+
+          sed -i -E "s/^pkgver=.*/pkgver=${VERSION}/" PKGBUILD
+          sed -i -E "s/^pkgrel=.*/pkgrel=1/" PKGBUILD
+          sed -i -E "s/^sha256sums=\(.*\)$/sha256sums=('${SHA256}')/" PKGBUILD
+
+          srcinfo_tmp="$(mktemp)"
+          ./scripts/gen-srcinfo.sh > "${srcinfo_tmp}"
+          mv "${srcinfo_tmp}" .SRCINFO
+
+          # Fail loudly if an edit did not take effect instead of publishing a
+          # PKGBUILD whose checksum does not match its source.
+          grep -Fqx "pkgver=${VERSION}" PKGBUILD
+          grep -Fqx "sha256sums=('${SHA256}')" PKGBUILD
+          grep -Fq "pkgver = ${VERSION}" .SRCINFO
+          grep -Fq "sha256sums = ${SHA256}" .SRCINFO
+          grep -Fq "satur8-v${VERSION}-source.tar.gz::" .SRCINFO
+
+          echo "--- packaging diff ---"
+          git diff -- PKGBUILD .SRCINFO
+
+      - name: Commit and push packaging repository
+        if: steps.release.outputs.update == 'true' && steps.assets.outputs.ready == 'true'
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+          VERSION: ${{ steps.release.outputs.version }}
+          TAG: ${{ steps.release.outputs.tag }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- PKGBUILD .SRCINFO; then
+            echo "Packaging repository already contains this version."
+            exit 0
+          fi
+
+          if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            echo "Dry run: not committing to the packaging repository."
+            exit 0
+          fi
+
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "Packaging repository already contains this version."
+            exit 0
+          fi
+
+          git commit -m "upgpkg: satur8 ${VERSION}-1" \
+            -m "Upstream release: https://github.com/${UPSTREAM_REPO}/releases/tag/${TAG}"
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Publish to AUR
+        if: steps.release.outputs.update == 'true' && steps.assets.outputs.ready == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_KNOWN_HOSTS: ${{ secrets.AUR_KNOWN_HOSTS }}
+          DRY_RUN: ${{ inputs.dry_run }}
+          VERSION: ${{ steps.release.outputs.version }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            echo "Dry run: not publishing to the AUR."
+            exit 0
+          fi
+
+          : "${AUR_SSH_PRIVATE_KEY:?AUR_SSH_PRIVATE_KEY repository secret is missing}"
+          : "${AUR_KNOWN_HOSTS:?AUR_KNOWN_HOSTS repository secret is missing}"
+
+          install -m 700 -d "${HOME}/.ssh"
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${HOME}/.ssh/aur"
+          chmod 600 "${HOME}/.ssh/aur"
+          printf '%s\n' "${AUR_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 644 "${HOME}/.ssh/known_hosts"
+
+          export GIT_SSH_COMMAND="ssh -i ${HOME}/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+          checkout_dir="$(mktemp -d)"
+          if ! git clone "ssh://aur@aur.archlinux.org/${AUR_PKG}.git" "${checkout_dir}/${AUR_PKG}"; then
+            echo "::error::Could not clone the AUR repository. Publish ${AUR_PKG} on the AUR first."
+            exit 1
+          fi
+
+          cp PKGBUILD .SRCINFO "${checkout_dir}/${AUR_PKG}/"
+          cd "${checkout_dir}/${AUR_PKG}"
+
+          git config user.name "Satur8 AUR updater"
+          git config user.email "112448715+NasirA1991@users.noreply.github.com"
+
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR already has this version; nothing to push."
+            exit 0
+          fi
+
+          git commit -m "upgpkg: ${AUR_PKG} ${VERSION}-1"
+          git push origin HEAD:master
+
+      - name: Keep the scheduled workflow active
+        # GitHub disables scheduled workflows after 60 days without repository
+        # activity. A commit every ~30 quiet days prevents that. Only runs when
+        # there was no release to publish.
+        if: steps.release.outputs.update != 'true'
+        env:
+          DRY_RUN: ${{ inputs.dry_run }}
+        run: |
+          set -euo pipefail
+
+          if [[ "${DRY_RUN:-false}" == "true" ]]; then
+            exit 0
+          fi
+
+          last="$(git log -1 --format=%ct -- .github/last-check 2>/dev/null || true)"
+          last="${last:-0}"
+          now="$(date +%s)"
+          if (( now - last < 30 * 24 * 3600 )); then
+            echo "Last keepalive commit is recent enough."
+            exit 0
+          fi
+
+          mkdir -p .github
+          date -u +'%Y-%m-%dT%H:%M:%SZ' > .github/last-check
+          git add .github/last-check
+          git commit -m "chore: keep the scheduled AUR update workflow active"
+          git push origin "HEAD:${GITHUB_REF_NAME}"

@@ -1,0 +1,8 @@
+/.work/
+/src/
+/pkg/
+/*.pkg.tar.*
+/*.src.tar.gz
+/.SRCINFO.gen
+
+/.upstream/
