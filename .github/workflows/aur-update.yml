@@ -77,14 +77,13 @@ jobs:
             exit 1
           fi
 
-          # The AUR is the source of truth for what is already published. If the
-          # RPC call fails, fail the run rather than risk pushing a duplicate or
-          # a downgrade based on a stale local PKGBUILD.
-          aur_json="$(curl -fsS --retry 3 "https://aur.archlinux.org/rpc/v5/info?arg[]=${AUR_PKG}")"
-          aur_version="$(jq -r '.results[0].Version // empty' <<<"${aur_json}")"
-          current="${aur_version%-*}"
+          # The AUR repository is the source of truth for what is already
+          # published. Read it through cgit rather than the RPC index, which can
+          # lag behind the repository for newly created packages.
+          aur_srcinfo="$(curl -fsS --retry 3 "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=${AUR_PKG}")"
+          current="$(sed -n 's/^\tpkgver = //p' <<<"${aur_srcinfo}" | head -n1)"
           if [[ -z "${current}" ]]; then
-            echo "::error::${AUR_PKG} is not published on the AUR (or the RPC response was empty)"
+            echo "::error::Could not read ${AUR_PKG}'s .SRCINFO from the AUR (is the package published?)"
             exit 1
           fi
 

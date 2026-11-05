@@ -46,7 +46,9 @@ Optional backends are declared as `optdepends`:
 Each run:
 
 1. Reads the latest release from `NtrpyDev/satur8` through the GitHub API.
-2. Reads the currently published version from the AUR RPC API.
+2. Reads the currently published version from the AUR repository. (The AUR RPC
+   index can lag for newly created packages, so the workflow reads `.SRCINFO`
+   through the AUR's cgit endpoint instead.)
 3. If upstream is newer, verifies the release's source archive:
    - the `.sha256` asset matches GitHub's own asset digest, and
    - the downloaded archive matches that checksum.
