@@ -6,3 +6,8 @@
 /.SRCINFO.gen
 
 /.upstream/
+
+/satur8-bin/src/
+/satur8-bin/pkg/
+/satur8-bin/*.pkg.tar.*
+/satur8-bin/*.tar.gz

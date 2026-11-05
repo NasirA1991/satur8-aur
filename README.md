@@ -1,31 +1,44 @@
 # satur8 — AUR packaging
 
-[AUR package](https://aur.archlinux.org/packages/satur8) for
-[Satur8](https://github.com/NtrpyDev/satur8): per-game digital vibrance for Linux.
+AUR packages for [Satur8](https://github.com/NtrpyDev/satur8): per-game digital
+vibrance for Linux.
 
-This repository holds the `PKGBUILD` and `.SRCINFO` that are published to the
-AUR, plus the GitHub Actions workflow that keeps the package in sync with
-upstream releases.
+Two packages are published:
+
+| Package | Build | AUR |
+| --- | --- | --- |
+| `satur8` | Builds from the upstream source archive on your machine | https://aur.archlinux.org/packages/satur8 |
+| `satur8-bin` | Downloads CI-built binaries from this repository's GitHub Releases | https://aur.archlinux.org/packages/satur8-bin |
+
+`satur8-bin` provides and conflicts with `satur8`, so install one or the other.
 
 ## Install
 
+No compiling:
+
 ```sh
-yay -S satur8
+yay -S satur8-bin
 # or
-paru -S satur8
+paru -S satur8-bin
 ```
 
-Manual installation:
+Build from source:
 
 ```sh
-git clone https://aur.archlinux.org/satur8.git
-cd satur8
+yay -S satur8
+```
+
+Manual installation works the same way:
+
+```sh
+git clone https://aur.archlinux.org/satur8-bin.git
+cd satur8-bin
 makepkg -si
 ```
 
-The package builds the Rust workspace and the KWin effect from the upstream
-release source archive. The KWin effect is compiled against your local KWin/Qt
-ABI, which is why this is a source package rather than `-bin`.
+The source package builds the Rust workspace and the KWin effect against your
+local KWin/Qt ABI. `satur8-bin` uses a prebuilt tree produced in a current
+`archlinux:base-devel` container.
 
 Optional backends are declared as `optdepends`:
 
@@ -38,68 +51,82 @@ Optional backends are declared as `optdepends`:
 
 ## Automated updates
 
-[`.github/workflows/aur-update.yml`](.github/workflows/aur-update.yml) runs:
+### `satur8` (source package)
 
-- every 6 hours (`17 */6 * * *`), and
-- on manual dispatch.
+[`.github/workflows/aur-update.yml`](.github/workflows/aur-update.yml) runs every
+6 hours and on manual dispatch. It:
 
-Each run:
+1. Reads the latest upstream release.
+2. Reads the currently published AUR version via cgit (the AUR RPC index can lag
+   for new packages).
+3. Verifies the release source archive against its `.sha256` asset, GitHub's
+   asset digest, and the downloaded file.
+4. Updates `pkgver`, resets `pkgrel`, updates `sha256sums`, and regenerates
+   `.SRCINFO`.
+5. Builds the package in an Arch container before publishing; a build failure
+   blocks the update.
+6. Commits here and pushes to `ssh://aur@aur.archlinux.org/satur8.git`.
 
-1. Reads the latest release from `NtrpyDev/satur8` through the GitHub API.
-2. Reads the currently published version from the AUR repository. (The AUR RPC
-   index can lag for newly created packages, so the workflow reads `.SRCINFO`
-   through the AUR's cgit endpoint instead.)
-3. If upstream is newer, verifies the release's source archive:
-   - the `.sha256` asset matches GitHub's own asset digest, and
-   - the downloaded archive matches that checksum.
-4. Updates `pkgver`, resets `pkgrel` to `1`, updates `sha256sums` in
-   `PKGBUILD`, and regenerates `.SRCINFO`.
-5. Builds the resulting package in a current `archlinux:base-devel` container
-   (Rust workspace, KWin effect, package step). If the build fails, nothing is
-   committed or published.
-6. Commits the packaging change here and pushes the same files to
-   `ssh://aur@aur.archlinux.org/satur8.git`.
+### `satur8-bin` (prebuilt package)
 
-AUR is treated as the source of truth for what is already published. If a push
-to the AUR fails after the GitHub commit succeeds, the next run sees the AUR is
-still behind and retries the publish.
+[`.github/workflows/build-bin.yml`](.github/workflows/build-bin.yml) runs after
+the source workflow completes, daily as a fallback, and on manual dispatch.
 
-The build check takes roughly 9 minutes on a GitHub-hosted runner and only runs
-when a new upstream version is found. It is the part that catches KWin/Qt/KF6
-drift (the v0.3.3 package needed a KWin 6.8 compatibility patch) before a broken
-update reaches users.
+When the AUR `satur8` version is newer than `satur8-bin` (or `satur8-bin` does
+not exist yet), it:
+
+1. Builds the source package in an `archlinux:base-devel` container.
+2. Repacks the installed file tree as
+   `satur8-bin-vX.Y.Z-REL-x86_64.tar.gz`.
+3. Publishes that tarball and its checksum as a GitHub Release in this
+   repository. AUR does not host binary artifacts, so GitHub Releases is the
+   download host, as is standard for `-bin` AUR packages.
+4. Updates `satur8-bin/PKGBUILD` (version, `pkgrel`, checksum), regenerates its
+   `.SRCINFO`, and pushes both to `ssh://aur@aur.archlinux.org/satur8-bin.git`.
+5. Creates the AUR repository on the first push if it does not exist yet.
 
 ### Why polling instead of an upstream release trigger?
 
 A GitHub Actions workflow in this repository can only receive events from this
-repository. GitHub does not let a workflow subscribe to `release` events from
-another account's repository, and upstream has no webhook or dispatch setup for
-us. Polling the releases API on a schedule is therefore the supported way to
-detect upstream releases without upstream cooperation.
+repository. GitHub does not let a workflow subscribe to another account's
+`release` events, and upstream has no webhook or dispatch setup for us. Polling
+the releases API on a schedule is therefore the supported way to detect upstream
+releases without upstream cooperation.
 
-The trade-off is latency: a new upstream release is picked up within roughly
-six hours (scheduled runs can be delayed by GitHub). Trigger the workflow
-manually when you want it immediately.
+Latency is roughly one to six hours depending on which workflow catches the
+release. Trigger either workflow manually when you want it immediately.
 
-### Manual runs
+## Manual runs
 
 ```sh
-# Normal update check
+# Source package update check
 gh workflow run aur-update.yml -R NasirA1991/satur8-aur
 
-# Check and render the diff without pushing to GitHub or the AUR
+# Source dry run: render the diff without pushing anywhere
 gh workflow run aur-update.yml -R NasirA1991/satur8-aur -f dry_run=true
 
 # Publish a specific upstream release tag
 gh workflow run aur-update.yml -R NasirA1991/satur8-aur -f tag=v0.3.3
+
+# Build satur8-bin if it is missing or behind (safe no-op when current)
+gh workflow run build-bin.yml -R NasirA1991/satur8-aur
+
+# Force a rebuild and pkgrel bump, e.g. after a KWin upgrade
+gh workflow run build-bin.yml -R NasirA1991/satur8-aur -f force=true
 ```
 
-### Required repository secrets
+The `force` rebuild is the binary-package path after the KWin effect ABI moves:
+the new tarball is built against current Arch KWin, published under
+`satur8-bin-vX.Y.Z-<new pkgrel>`, and the AUR package is updated.
+
+## Required repository secrets
 
 | Secret | Purpose |
 | --- | --- |
 | `AUR_SSH_PRIVATE_KEY` | Private SSH key authorized on the AUR account (`nasir91`) |
 | `AUR_KNOWN_HOSTS` | Pinned AUR SSH host keys, used with `StrictHostKeyChecking=yes` |
+
+Both AUR packages use the same two secrets.
 
 Set or rotate them with:
 
@@ -117,13 +144,10 @@ ssh-keygen -lf /tmp/aur-known-hosts
 # AUR publishes its fingerprints at https://aur.archlinux.org/
 ```
 
-To retire the key, remove it from the AUR account and replace the secret; CI
-only needs push access to the AUR repository.
-
-### Scheduled workflow keepalive
+## Scheduled workflow keepalive
 
 GitHub disables scheduled workflows after 60 days without repository activity.
-When there has been no release to publish for about 30 days, the workflow
+When there has been no release to publish for about 30 days, the source workflow
 commits a timestamp to `.github/last-check` so the schedule stays enabled. The
 commit says `chore: keep the scheduled AUR update workflow active` and does not
 touch the AUR.
@@ -131,29 +155,33 @@ touch the AUR.
 ## Local development
 
 ```sh
-make check      # compare scripts/gen-srcinfo.sh with makepkg --printsrcinfo
-make srcinfo    # regenerate .SRCINFO
-makepkg -si     # build and install (Arch/CachyOS)
+make check      # compare both .SRCINFO files with makepkg --printsrcinfo
+make srcinfo    # regenerate both .SRCINFO files
+makepkg -si     # build/install the source package (Arch/CachyOS)
+(cd satur8-bin && makepkg -si)  # build/install the binary package
 ```
 
-`makepkg` is required for `make check`; the CI update path uses the small,
-dependency-free renderer in `scripts/gen-srcinfo.sh` because GitHub's Ubuntu
-runners do not ship `makepkg`.
+`makepkg` is required for `make check`; CI uses the small, dependency-free
+renderer in `scripts/gen-srcinfo.sh` because GitHub's Ubuntu runners do not ship
+`makepkg`.
 
 ## Notes
 
-- Architecture: `x86_64` only, matching the upstream release artifacts.
-- The package installs `satur8`, `satur8-daemon`, `satur8-tray`, and
+- Architecture: `x86_64` only, matching the upstream release artifacts and the
+  CI-built binary tarball.
+- Both packages install `satur8`, `satur8-daemon`, `satur8-tray`, and
   `satur8-gui`, the KWin effect plugin and focus script, the GNOME extension,
   the gamescope shader, the app icon, a systemd user unit, and the desktop
   entry.
-- KWin's effect ABI is not stable. The package builds the effect against your
-  installed KWin and requires `kwin>=6.8.0` at build time. Rebuild the package
-  after a KWin major upgrade so the plugin matches the running compositor.
-- Upstream v0.3.3 predates KWin 6.8. The PKGBUILD's `prepare()` applies a small
+- KWin's effect ABI is not stable. `satur8` builds the effect against your
+  installed KWin (`kwin>=6.8.0` at build time); `satur8-bin` includes an effect
+  built against Arch's KWin when CI produced it. After a KWin major upgrade,
+  rebuild `satur8` locally or run the `force` binary rebuild above.
+- Upstream v0.3.3 predates KWin 6.8. The source PKGBUILD's `prepare()` applies a
   compatibility change for the new `OffscreenEffect::drawWindow` signature and
   adds Qt6 Qml's include path for KWin 6.8 headers. The change is skipped
-  automatically once upstream ships the fix.
+  automatically once upstream ships the fix. `satur8-bin` is built from that
+  same patched source.
 - Enable the per-game daemon with:
 
   ```sh

@@ -1,0 +1,277 @@
+name: Build satur8-bin
+
+on:
+  # Run shortly after the source package workflow so a new satur8 release is
+  # followed by a matching prebuilt satur8-bin package.
+  workflow_run:
+    workflows: ["Update AUR package"]
+    types: [completed]
+  schedule:
+    # Fallback in case a workflow_run event is missed or the AUR was unavailable.
+    - cron: "43 5 * * *"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: "Rebuild the current version and bump satur8-bin pkgrel (e.g. after a KWin update)"
+        required: false
+        type: boolean
+        default: false
+
+permissions:
+  contents: write
+
+concurrency:
+  group: build-satur8-bin
+  cancel-in-progress: false
+
+env:
+  UPSTREAM_REPO: NtrpyDev/satur8
+  AUR_PKG: satur8-bin
+  SOURCE_PKG: satur8
+
+jobs:
+  build:
+    name: Build and publish satur8-bin
+    if: github.event_name != 'workflow_run' || github.event.workflow_run.conclusion == 'success'
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out packaging repository
+        uses: actions/checkout@v7
+        with:
+          fetch-depth: 0
+
+      - name: Configure git identity
+        run: |
+          git config user.name "Satur8 AUR updater"
+          git config user.email "112448715+NasirA1991@users.noreply.github.com"
+
+      - name: Compare source and binary package versions
+        id: versions
+        env:
+          FORCE: ${{ inputs.force }}
+        run: |
+          set -euo pipefail
+
+          read_aur_srcinfo() {
+            curl -fsS --retry 3 "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=$1" 2>/dev/null || true
+          }
+
+          source_srcinfo="$(read_aur_srcinfo "${SOURCE_PKG}")"
+          source_version="$(sed -n 's/^\tpkgver = //p' <<<"${source_srcinfo}" | head -n1)"
+          source_pkgrel="$(sed -n 's/^\tpkgrel = //p' <<<"${source_srcinfo}" | head -n1)"
+          if [[ -z "${source_version}" ]]; then
+            echo "::error::Could not read ${SOURCE_PKG} from the AUR"
+            exit 1
+          fi
+
+          repo_version="$(sed -n 's/^pkgver=//p' PKGBUILD | head -n1)"
+          repo_pkgrel="$(sed -n 's/^pkgrel=//p' PKGBUILD | head -n1)"
+          if [[ "${repo_version}" != "${source_version}" ]]; then
+            echo "::error::AUR ${SOURCE_PKG} is ${source_version}-${source_pkgrel} but this checkout has ${repo_version}-${repo_pkgrel}; the source package is not synced"
+            exit 1
+          fi
+
+          bin_srcinfo="$(read_aur_srcinfo "${AUR_PKG}")"
+          bin_version="$(sed -n 's/^\tpkgver = //p' <<<"${bin_srcinfo}" | head -n1)"
+          bin_pkgrel="$(sed -n 's/^\tpkgrel = //p' <<<"${bin_srcinfo}" | head -n1)"
+          bin_pkgrel="${bin_pkgrel:-0}"
+
+          build=false
+          pkgrel=1
+
+          if [[ -z "${bin_version}" ]]; then
+            build=true
+            echo "AUR ${AUR_PKG} does not exist yet; building ${source_version}-1"
+          elif [[ "${source_version}" != "${bin_version}" ]] &&
+               [[ "$(printf '%s\n%s\n' "${bin_version}" "${source_version}" | sort -V | tail -n1)" == "${source_version}" ]]; then
+            build=true
+            echo "Source is ${source_version}; AUR ${AUR_PKG} is ${bin_version}-${bin_pkgrel}; building ${source_version}-1"
+          elif [[ "${source_version}" == "${bin_version}" && "${FORCE:-false}" == "true" ]]; then
+            build=true
+            pkgrel=$((bin_pkgrel + 1))
+            echo "Force rebuild: bumping ${AUR_PKG} from ${bin_version}-${bin_pkgrel} to ${source_version}-${pkgrel}"
+          elif [[ "${source_version}" == "${bin_version}" ]]; then
+            echo "${AUR_PKG} is already at ${bin_version}-${bin_pkgrel}; nothing to do"
+          else
+            echo "::error::AUR ${AUR_PKG} (${bin_version}-${bin_pkgrel}) is newer than source ${source_version}"
+            exit 1
+          fi
+
+          asset="${AUR_PKG}-v${source_version}-${pkgrel}-x86_64.tar.gz"
+          tag="${AUR_PKG}-v${source_version}-${pkgrel}"
+
+          {
+            echo "source_version=${source_version}"
+            echo "source_pkgrel=${source_pkgrel}"
+            echo "bin_version=${bin_version}"
+            echo "bin_pkgrel=${bin_pkgrel}"
+            echo "build=${build}"
+            echo "pkgver=${source_version}"
+            echo "pkgrel=${pkgrel}"
+            echo "asset=${asset}"
+            echo "tag=${tag}"
+          } >> "${GITHUB_OUTPUT}"
+
+      - name: Build binary tarball on Arch
+        if: steps.versions.outputs.build == 'true'
+        env:
+          ASSET: ${{ steps.versions.outputs.asset }}
+        run: |
+          set -euo pipefail
+
+          build_dir="${RUNNER_TEMP}/satur8-bin-build"
+          rm -rf "${build_dir}"
+          mkdir -p "${build_dir}"
+          cp PKGBUILD "${build_dir}/"
+
+          docker run --rm \
+            -e HOST_UID="$(id -u)" \
+            -e ASSET="${ASSET}" \
+            -v "${build_dir}:/work" \
+            -w /work \
+            archlinux:base-devel \
+            bash -euc '
+              pacman -Syu --noconfirm --needed rust cmake kwin qt6-base qt6-declarative kcoreaddons kconfig libarchive >/tmp/pacman.log 2>&1 || { tail -50 /tmp/pacman.log; exit 1; }
+              useradd -m -u "$HOST_UID" builder
+              su builder -c "SRCDEST=/work makepkg --nodeps --nocheck --noconfirm"
+              pkgfile="$(find /work -type f -name "satur8-*.pkg.tar.zst" -print -quit)"
+              test -n "$pkgfile"
+              mkdir -p /work/stage
+              bsdtar -xf "$pkgfile" -C /work/stage
+              rm -f /work/stage/.PKGINFO /work/stage/.MTREE /work/stage/.BUILDINFO
+              tar -C /work/stage --sort=name --owner=0 --group=0 --numeric-owner -czf "/work/${ASSET}" .
+              (cd /work && sha256sum "${ASSET}" > "${ASSET}.sha256")
+              pacman -Q kwin > /work/build-info.txt
+            '
+
+          ls -lh "${build_dir}/${ASSET}" "${build_dir}/${ASSET}.sha256"
+          cat "${build_dir}/build-info.txt"
+
+      - name: Publish binary tarball to GitHub Releases
+        if: steps.versions.outputs.build == 'true'
+        env:
+          GH_TOKEN: ${{ github.token }}
+          TAG: ${{ steps.versions.outputs.tag }}
+          ASSET: ${{ steps.versions.outputs.asset }}
+          PKGVER: ${{ steps.versions.outputs.pkgver }}
+          PKGREL: ${{ steps.versions.outputs.pkgrel }}
+        run: |
+          set -euo pipefail
+
+          build_dir="${RUNNER_TEMP}/satur8-bin-build"
+          asset_path="${build_dir}/${ASSET}"
+          test -f "${asset_path}"
+          test -f "${asset_path}.sha256"
+          (cd "${build_dir}" && sha256sum -c "${ASSET}.sha256")
+
+          notes="Prebuilt satur8 ${PKGVER} for Arch Linux x86_64, built in GitHub Actions against the current Arch kwin/Qt/KF6 packages."
+          notes+=$'\n'"Source: https://github.com/${UPSTREAM_REPO}/releases/tag/v${PKGVER}"
+
+          if gh release view "${TAG}" -R "${GITHUB_REPOSITORY}" >/dev/null 2>&1; then
+            gh release upload "${TAG}" "${asset_path}" "${asset_path}.sha256" \
+              -R "${GITHUB_REPOSITORY}" --clobber
+          else
+            gh release create "${TAG}" "${asset_path}" "${asset_path}.sha256" \
+              -R "${GITHUB_REPOSITORY}" \
+              --title "satur8-bin ${PKGVER}-${PKGREL}" \
+              --notes "${notes}"
+          fi
+
+      - name: Update satur8-bin packaging metadata
+        if: steps.versions.outputs.build == 'true'
+        env:
+          PKGVER: ${{ steps.versions.outputs.pkgver }}
+          PKGREL: ${{ steps.versions.outputs.pkgrel }}
+          ASSET: ${{ steps.versions.outputs.asset }}
+        run: |
+          set -euo pipefail
+
+          build_dir="${RUNNER_TEMP}/satur8-bin-build"
+          sha="$(awk '{print $1}' "${build_dir}/${ASSET}.sha256")"
+
+          sed -i -E \
+            "s/^pkgver=.*/pkgver=${PKGVER}/; s/^pkgrel=.*/pkgrel=${PKGREL}/; s/^sha256sums=\(.*\)$/sha256sums=('${sha}')/" \
+            satur8-bin/PKGBUILD
+
+          srcinfo_tmp="$(mktemp)"
+          ./scripts/gen-srcinfo.sh satur8-bin > "${srcinfo_tmp}"
+          mv "${srcinfo_tmp}" satur8-bin/.SRCINFO
+
+          grep -Fqx "pkgver=${PKGVER}" satur8-bin/PKGBUILD
+          grep -Fqx "pkgrel=${PKGREL}" satur8-bin/PKGBUILD
+          grep -Fqx "sha256sums=('${sha}')" satur8-bin/PKGBUILD
+          grep -Fq "pkgver = ${PKGVER}" satur8-bin/.SRCINFO
+          grep -Fq "pkgrel = ${PKGREL}" satur8-bin/.SRCINFO
+          grep -Fq "sha256sums = ${sha}" satur8-bin/.SRCINFO
+          grep -Fq "satur8-bin-v${PKGVER}-${PKGREL}-x86_64.tar.gz::" satur8-bin/.SRCINFO
+
+          echo "--- satur8-bin packaging diff ---"
+          git diff -- satur8-bin/PKGBUILD satur8-bin/.SRCINFO
+
+      - name: Commit and push satur8-bin metadata
+        if: steps.versions.outputs.build == 'true'
+        env:
+          PKGVER: ${{ steps.versions.outputs.pkgver }}
+          PKGREL: ${{ steps.versions.outputs.pkgrel }}
+        run: |
+          set -euo pipefail
+
+          if git diff --quiet -- satur8-bin/PKGBUILD satur8-bin/.SRCINFO; then
+            echo "Packaging repository already has this satur8-bin version."
+            exit 0
+          fi
+
+          git add satur8-bin/PKGBUILD satur8-bin/.SRCINFO
+          git commit -m "upgpkg: satur8-bin ${PKGVER}-${PKGREL}"
+
+          # The scheduled source workflow may have pushed a keepalive commit
+          # after this run checked out. Fetch + rebase also works on the detached
+          # HEAD that workflow_run checkouts can have.
+          git fetch origin "${GITHUB_REF_NAME}"
+          git rebase FETCH_HEAD
+          git push origin "HEAD:${GITHUB_REF_NAME}"
+
+      - name: Publish satur8-bin to AUR
+        if: steps.versions.outputs.build == 'true'
+        env:
+          AUR_SSH_PRIVATE_KEY: ${{ secrets.AUR_SSH_PRIVATE_KEY }}
+          AUR_KNOWN_HOSTS: ${{ secrets.AUR_KNOWN_HOSTS }}
+          PKGVER: ${{ steps.versions.outputs.pkgver }}
+          PKGREL: ${{ steps.versions.outputs.pkgrel }}
+        run: |
+          set -euo pipefail
+
+          : "${AUR_SSH_PRIVATE_KEY:?AUR_SSH_PRIVATE_KEY repository secret is missing}"
+          : "${AUR_KNOWN_HOSTS:?AUR_KNOWN_HOSTS repository secret is missing}"
+
+          install -m 700 -d "${HOME}/.ssh"
+          printf '%s\n' "${AUR_SSH_PRIVATE_KEY}" > "${HOME}/.ssh/aur"
+          chmod 600 "${HOME}/.ssh/aur"
+          printf '%s\n' "${AUR_KNOWN_HOSTS}" > "${HOME}/.ssh/known_hosts"
+          chmod 644 "${HOME}/.ssh/known_hosts"
+
+          export GIT_SSH_COMMAND="ssh -i ${HOME}/.ssh/aur -o IdentitiesOnly=yes -o StrictHostKeyChecking=yes"
+
+          checkout_dir="${RUNNER_TEMP}/aur-${AUR_PKG}"
+          rm -rf "${checkout_dir}"
+          if ! git clone "ssh://aur@aur.archlinux.org/${AUR_PKG}.git" "${checkout_dir}"; then
+            echo "AUR ${AUR_PKG} does not exist yet; creating it with the first push."
+            rm -rf "${checkout_dir}"
+            git init -b master "${checkout_dir}"
+            git -C "${checkout_dir}" remote add origin "ssh://aur@aur.archlinux.org/${AUR_PKG}.git"
+          fi
+
+          cp satur8-bin/PKGBUILD satur8-bin/.SRCINFO "${checkout_dir}/"
+          cd "${checkout_dir}"
+
+          git config user.name "Satur8 AUR updater"
+          git config user.email "112448715+NasirA1991@users.noreply.github.com"
+
+          git add PKGBUILD .SRCINFO
+          if git diff --cached --quiet; then
+            echo "AUR already has this satur8-bin version; nothing to push."
+            exit 0
+          fi
+
+          git commit -m "upgpkg: ${AUR_PKG} ${PKGVER}-${PKGREL}"
+          git push origin HEAD:master

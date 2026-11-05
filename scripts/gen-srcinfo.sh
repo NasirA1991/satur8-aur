@@ -1,14 +1,25 @@
 #!/usr/bin/env bash
-# Render the AUR .SRCINFO from PKGBUILD metadata.
+# Render the AUR .SRCINFO for a package directory in this repository.
+#
+# Usage: scripts/gen-srcinfo.sh [package-dir]
+#   package-dir defaults to the repository root (the `satur8` package).
 #
 # AUR requires a .SRCINFO next to the PKGBUILD. makepkg --printsrcinfo is the
-# canonical generator, but the update workflow runs on Ubuntu where makepkg is
-# not available. This small renderer covers the fields this package uses and is
-# kept byte-for-byte compatible with `makepkg --printsrcinfo` (see `make check`).
+# canonical generator, but the update workflows run on Ubuntu where makepkg is
+# not available. This small renderer covers the fields these packages use and
+# is kept byte-for-byte compatible with `makepkg --printsrcinfo` (see
+# `make check`).
 set -euo pipefail
 
 repo_root="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")/.." && pwd)"
 cd -- "$repo_root"
+
+package_dir="${1:-.}"
+if [[ ! -f "${package_dir}/PKGBUILD" ]]; then
+    echo "error: no PKGBUILD in ${package_dir}" >&2
+    exit 1
+fi
+cd -- "${package_dir}"
 
 # PKGBUILD is trusted repository data.
 # shellcheck disable=SC1091
