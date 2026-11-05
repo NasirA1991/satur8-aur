@@ -78,9 +78,10 @@ jobs:
           fi
 
           # The AUR repository is the source of truth for what is already
-          # published. Read it through cgit rather than the RPC index, which can
-          # lag behind the repository for newly created packages.
-          aur_srcinfo="$(curl -fsS --retry 3 "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=${AUR_PKG}")"
+          # published. Read it through cgit (with a cache-buster, because the
+          # default cgit URL can serve a stale branch snapshot after a push)
+          # rather than the RPC index, which can lag for new packages.
+          aur_srcinfo="$(curl -fsS --retry 3 "https://aur.archlinux.org/cgit/aur.git/plain/.SRCINFO?h=${AUR_PKG}&t=$(date +%s%N)")"
           current="$(sed -n 's/^\tpkgver = //p' <<<"${aur_srcinfo}" | head -n1)"
           if [[ -z "${current}" ]]; then
             echo "::error::Could not read ${AUR_PKG}'s .SRCINFO from the AUR (is the package published?)"
