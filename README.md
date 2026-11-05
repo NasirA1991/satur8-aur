@@ -182,6 +182,15 @@ renderer in `scripts/gen-srcinfo.sh` because GitHub's Ubuntu runners do not ship
   adds Qt6 Qml's include path for KWin 6.8 headers. The change is skipped
   automatically once upstream ships the fix. `satur8-bin` is built from that
   same patched source.
+- Upstream v0.3.3's KWin focus script ships `metadata.json` without
+  `KPackageStructure`, which KWin 6.x rejects with `does not match requested
+  format "KWin/Script"`. The script then never loads, so per-game profiles never
+  follow focus. `prepare()` adds the key and skips the change once upstream
+  ships the fix.
+- The GUI's "Add running game" list is built from `/proc/<pid>/exe`, so
+  Proton/Wine titles appear as `wine64-preloader` instead of their `.exe` name.
+  Add those from the CLI, for example
+  `satur8 profile add juvio 1.5 --exe juvio.exe --window-class juvio.exe`.
 - Enable the per-game daemon with:
 
   ```sh
