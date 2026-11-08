@@ -187,10 +187,17 @@ renderer in `scripts/gen-srcinfo.sh` because GitHub's Ubuntu runners do not ship
   format "KWin/Script"`. The script then never loads, so per-game profiles never
   follow focus. `prepare()` adds the key and skips the change once upstream
   ships the fix.
-- The GUI's "Add running game" list is built from `/proc/<pid>/exe`, so
-  Proton/Wine titles appear as `wine64-preloader` instead of their `.exe` name.
-  Add those from the CLI, for example
-  `satur8 profile add juvio 1.5 --exe juvio.exe --window-class juvio.exe`.
+- Upstream v0.3.3's GUI "Add running game" list is built from
+  `/proc/<pid>/exe`, so Proton/Wine titles appear as `wine64-preloader` instead
+  of their `.exe` name. `0001-gui-proton-running-apps.patch` resolves the image
+  name from `argv[0]` for Wine loader processes and filters Wine's system
+  helpers. The patch is removed once upstream ships the fix.
+- Upstream v0.3.3's KWin effect still attaches its shader at saturation `1.0`
+  but skips setting its uniforms; the GL defaults are zero, so a 0% profile
+  renders black. `0002-kwin-identity-black-screen.patch` always sets the
+  uniforms and makes the KWin backend unload the effect at identity.
+- `satur8-bin` is built from the same patched source by CI; force a rebuild
+  after these patches are published so the prebuilt package includes them.
 - Enable the per-game daemon with:
 
   ```sh
