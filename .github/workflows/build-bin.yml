@@ -136,7 +136,9 @@ jobs:
               pacman -Syu --noconfirm --needed rust cmake kwin qt6-base qt6-declarative kcoreaddons kconfig libarchive >/tmp/pacman.log 2>&1 || { tail -50 /tmp/pacman.log; exit 1; }
               useradd -m -u "$HOST_UID" builder
               su builder -c "SRCDEST=/work makepkg --nodeps --nocheck --noconfirm"
-              pkgfile="$(find /work -type f -name "satur8-*.pkg.tar.zst" -print -quit)"
+              # Skip the separate -debug package makepkg emits; match only the
+              # real package name satur8-<pkgver>-<pkgrel>-<arch>.pkg.tar.zst.
+              pkgfile="$(find /work -type f -name "satur8-[0-9]*.pkg.tar.zst" -print -quit)"
               test -n "$pkgfile"
               mkdir -p /work/stage
               bsdtar -xf "$pkgfile" -C /work/stage
