@@ -122,7 +122,9 @@ jobs:
           build_dir="${RUNNER_TEMP}/satur8-bin-build"
           rm -rf "${build_dir}"
           mkdir -p "${build_dir}"
-          cp PKGBUILD "${build_dir}/"
+          # The source PKGBUILD references local patch files; makepkg looks for
+          # them in the build directory, so copy them alongside it.
+          cp PKGBUILD ./*.patch "${build_dir}/"
 
           docker run --rm \
             -e HOST_UID="$(id -u)" \
